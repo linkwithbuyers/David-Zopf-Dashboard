@@ -13,10 +13,14 @@ import {
 } from "../lib/campaign";
 import { sourceConfig } from "../lib/source-config";
 
-const CACHE_KEY = "lwb-dashboard-last-good-view";
-const SEEN_KEY = "lwb-dashboard-seen-action-items";
-const ARCHIVE_KEY = "lwb-dashboard-archived-prospects";
-const PINNED_KEY = "lwb-dashboard-pinned-prospects";
+// Every client dashboard is served from the same github.io origin, so localStorage is
+// shared across all of them. Namespacing by Sheet id keeps each client's cached view,
+// pins and archive decisions separate instead of bleeding between dashboards.
+const STORE_NS = `:${sourceConfig.sheetId}`;
+const CACHE_KEY = `lwb-dashboard-last-good-view${STORE_NS}`;
+const SEEN_KEY = `lwb-dashboard-seen-action-items${STORE_NS}`;
+const ARCHIVE_KEY = `lwb-dashboard-archived-prospects${STORE_NS}`;
+const PINNED_KEY = `lwb-dashboard-pinned-prospects${STORE_NS}`;
 
 type CachedView = { records: LeadRecord[]; refreshedAt: string };
 
