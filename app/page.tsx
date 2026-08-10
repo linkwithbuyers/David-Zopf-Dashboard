@@ -2,12 +2,14 @@
 
 import { useMemo, useState } from "react";
 import {
+  emailHref,
   formatActivityTime,
   formatDateOnly,
   formatPhone,
   latestVideoSent,
   normalizeRows,
   parseCsv,
+  phoneHref,
   simplifyLocation,
   type LeadRecord,
 } from "../lib/campaign";
@@ -67,6 +69,12 @@ function WatchedIndicator({ date, complete }: { date: string; complete: boolean 
   );
 }
 
+function ContactValue({ href, text, fallback }: { href: string; text: string; fallback: string }) {
+  if (!text) return <>{fallback}</>;
+  if (!href) return <>{text}</>;
+  return <a className="contact-link" href={href} onClick={(event) => event.stopPropagation()}>{text}</a>;
+}
+
 function LeadCard({ record, archived, pinned, onViewConversation, onArchive, onPin }: { record: LeadRecord; archived?: boolean; pinned?: boolean; onViewConversation: (record: LeadRecord) => void; onArchive: (record: LeadRecord) => void; onPin: (record: LeadRecord) => void }) {
   return (
     <article className="lead-card">
@@ -76,8 +84,8 @@ function LeadCard({ record, archived, pinned, onViewConversation, onArchive, onP
           <p className="lead-title">
             {[record.title, record.company].filter(Boolean).join(" at ") || "Profile details unavailable"}
           </p>
-          <p className="contact-line"><span className="contact-label">email:</span> {record.email || "Email unavailable"}</p>
-          <p className="contact-line"><span className="contact-label">tel:</span> {formatPhone(record.phone) || "Phone unavailable"}</p>
+          <p className="contact-line"><span className="contact-label">email:</span> <ContactValue href={emailHref(record.email)} text={record.email} fallback="Email unavailable" /></p>
+          <p className="contact-line"><span className="contact-label">tel:</span> <ContactValue href={phoneHref(record.phone)} text={formatPhone(record.phone)} fallback="Phone unavailable" /></p>
         </div>
         {record.location ? <span className="location">{simplifyLocation(record.location)}</span> : null}
       </div>
