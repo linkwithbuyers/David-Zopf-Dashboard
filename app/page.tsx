@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   emailHref,
   formatActivityTime,
@@ -14,6 +14,7 @@ import {
   type LeadRecord,
 } from "../lib/campaign";
 import { sourceConfig } from "../lib/source-config";
+import { notesConfig } from "../lib/notes-config";
 
 // Every client dashboard is served from the same github.io origin, so localStorage is
 // shared across all of them. Namespacing by Sheet id keeps each client's cached view,
@@ -23,7 +24,13 @@ const CACHE_KEY = `lwb-dashboard-last-good-view${STORE_NS}`;
 const SEEN_KEY = `lwb-dashboard-seen-action-items${STORE_NS}`;
 const ARCHIVE_KEY = `lwb-dashboard-archived-prospects${STORE_NS}`;
 const PINNED_KEY = `lwb-dashboard-pinned-prospects${STORE_NS}`;
-const NOTES_KEY = `lwb-dashboard-notes-override${STORE_NS}`;
+// Unsaved typing, so a refresh or reload never loses in-progress edits.
+const NOTES_DRAFT_KEY = `lwb-dashboard-notes-drafts${STORE_NS}`;
+// Notes already written to the Sheet but not yet visible in the CSV export,
+// which Google caches for a short while after a write.
+const NOTES_PENDING_KEY = `lwb-dashboard-notes-pending${STORE_NS}`;
+// How long a pending write keeps winning over the Sheet value.
+const PENDING_TTL_MS = 3 * 60 * 1000;
 
 type CachedView = { records: LeadRecord[]; refreshedAt: string };
 
@@ -76,44 +83,112 @@ function ContactValue({ href, text, fallback }: { href: string; text: string; fa
   return <a className="contact-link" href={href} onClick={(event) => event.stopPropagation()}>{text}</a>;
 }
 
-function InlineNotesEditor({ record, noteOverride, onSaveNote }: { record: LeadRecord; noteOverride?: string; onSaveNote: (record: LeadRecord, value: string) => void }) {
-  const effectiveNotes = noteOverride !== undefined ? noteOverride : record.notes;
-  const [draft, setDraft] = useState(effectiveNotes);
-  const [dirty, setDirty] = useState(false);
-  const [savedFlash, setSavedFlash] = useState(false);
+type PendingNote = { value: string; savedAt: number };
+type SaveState = "idle" | "saving" | "saved" | "error";
 
-  useEffect(() => {
-    if (!dirty) setDraft(effectiveNotes);
-  }, [effectiveNotes, dirty]);
+/**
+ * Resolve what the textarea should show. Precedence:
+ *   1. an unsaved draft the user is still typing
+ *   2. a recent successful write the Sheet has not echoed back yet
+ *   3. column F itself, which is the source of truth
+ */
+function effectiveNote(base: string, draft: string | undefined, pending: PendingNote | undefined) {
+  if (draft !== undefined) return draft;
+  if (pending && Date.now() - pending.savedAt < PENDING_TTL_MS) return pending.value;
+  return base;
+}
 
-  const commit = () => {
-    if (!dirty) return;
-    onSaveNote(record, draft);
-    setDirty(false);
-    setSavedFlash(true);
-    window.setTimeout(() => setSavedFlash(false), 1500);
-  };
+/**
+ * POST the note to the Apps Script web app. Content-Type is text/plain on
+ * purpose: it keeps the request "simple" so the browser skips the CORS
+ * preflight, which Apps Script cannot answer.
+ */
+async function postNote(record: LeadRecord, value: string) {
+  if (!notesConfig.endpoint) throw new Error("The notes endpoint is not configured yet.");
+
+  const response = await fetch(notesConfig.endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({
+      token: notesConfig.token,
+      sheetId: sourceConfig.sheetId,
+      gid: sourceConfig.sheetGid,
+      profileUrl: record.profileUrl,
+      fullName: record.fullName,
+      notes: value,
+    }),
+    redirect: "follow",
+  });
+
+  if (!response.ok) throw new Error(`The Sheet rejected the write (${response.status}).`);
+
+  const payload = await response.json().catch(() => null);
+  if (!payload || payload.ok !== true) {
+    throw new Error(payload && payload.error ? String(payload.error) : "The Sheet write failed.");
+  }
+  return payload;
+}
+
+function NotesEditor({ record, draft, pending, onDraftChange, onSaved }: { record: LeadRecord; draft?: string; pending?: PendingNote; onDraftChange: (record: LeadRecord, value: string | undefined) => void; onSaved: (record: LeadRecord, value: string) => void }) {
+  const shown = effectiveNote(record.notesCell, draft, pending);
+  const [state, setState] = useState<SaveState>("idle");
+  const [message, setMessage] = useState("");
+  const dirty = draft !== undefined && draft !== effectiveNote(record.notesCell, undefined, pending);
+
+  const save = useCallback(async () => {
+    if (draft === undefined) return;
+    const value = draft;
+    setState("saving");
+    setMessage("");
+    try {
+      await postNote(record, value);
+      onSaved(record, value);
+      setState("saved");
+      window.setTimeout(() => setState((current) => (current === "saved" ? "idle" : current)), 2000);
+    } catch (caught) {
+      setState("error");
+      setMessage(caught instanceof Error ? caught.message : "The note could not be saved.");
+    }
+  }, [draft, record, onSaved]);
+
+  const statusLabel =
+    state === "saving" ? "Saving to Sheet\u2026" :
+    state === "saved" ? "Saved to Sheet" :
+    state === "error" ? message || "Save failed" :
+    dirty ? "Unsaved" : "";
 
   return (
     <div className="notes-inline" onClick={(event) => event.stopPropagation()}>
-      <div className="notes-inline-header" style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+      <div className="notes-inline-header" style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px", flexWrap: "wrap" }}>
         <span className="contact-label">Notes</span>
-        {savedFlash ? <span className="notes-saved-flash" style={{ fontSize: "0.75em", opacity: 0.7 }}>Saved</span> : dirty ? <span className="notes-dirty-flash" style={{ fontSize: "0.75em", opacity: 0.7 }}>Unsaved</span> : null}
+        {statusLabel ? (
+          <span className="notes-status" style={{ fontSize: "0.75em", opacity: 0.75, color: state === "error" ? "#b3261e" : "inherit" }}>{statusLabel}</span>
+        ) : null}
       </div>
       <textarea
         className="notes-inline-editor"
-        value={draft}
-        onChange={(event) => { setDraft(event.target.value); setDirty(true); }}
-        onBlur={commit}
+        value={shown}
+        onChange={(event) => onDraftChange(record, event.target.value)}
+        onBlur={() => { if (dirty) void save(); }}
         rows={4}
         placeholder="Add notes for this prospect..."
         style={{ width: "100%", padding: "8px", fontFamily: "inherit", fontSize: "0.9em", resize: "vertical", boxSizing: "border-box" }}
       />
+      {dirty || state === "error" ? (
+        <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
+          <button className="card-toggle" onClick={() => void save()} disabled={state === "saving"}>
+            {state === "saving" ? "Saving\u2026" : state === "error" ? "Retry save" : "Save to Sheet"}
+          </button>
+          <button className="card-toggle" onClick={() => { onDraftChange(record, undefined); setState("idle"); setMessage(""); }} disabled={state === "saving"}>
+            Discard
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function LeadCard({ record, archived, pinned, noteOverride, onViewConversation, onArchive, onPin, onSaveNote }: { record: LeadRecord; archived?: boolean; pinned?: boolean; noteOverride?: string; onViewConversation: (record: LeadRecord) => void; onArchive: (record: LeadRecord) => void; onPin: (record: LeadRecord) => void; onSaveNote: (record: LeadRecord, value: string) => void }) {
+function LeadCard({ record, archived, pinned, draft, pending, onViewConversation, onArchive, onPin, onDraftChange, onSaved }: { record: LeadRecord; archived?: boolean; pinned?: boolean; draft?: string; pending?: PendingNote; onViewConversation: (record: LeadRecord) => void; onArchive: (record: LeadRecord) => void; onPin: (record: LeadRecord) => void; onDraftChange: (record: LeadRecord, value: string | undefined) => void; onSaved: (record: LeadRecord, value: string) => void }) {
   return (
     <article className="lead-card">
       <div className="lead-heading">
@@ -133,7 +208,7 @@ function LeadCard({ record, archived, pinned, noteOverride, onViewConversation, 
       </div>
       {record.kind === "reply-before-video" ? <p className="manual-note">Stop video manually in the Sheet if needed.</p> : null}
       {record.sourceIncomplete ? <p className="data-note">Some source details are incomplete.</p> : null}
-      <InlineNotesEditor record={record} noteOverride={noteOverride} onSaveNote={onSaveNote} />
+      <NotesEditor record={record} draft={draft} pending={pending} onDraftChange={onDraftChange} onSaved={onSaved} />
       <div className="card-footer">
         <div className="card-actions card-toggle-actions">
           <button className={`card-toggle archive-button ${archived ? "restore-button" : ""}`} onClick={() => onArchive(record)}>{archived ? "Restore" : "Archive"}</button>
@@ -150,37 +225,17 @@ function LeadCard({ record, archived, pinned, noteOverride, onViewConversation, 
   );
 }
 
-function ConversationText({ record, noteOverride, onSaveNote }: { record: LeadRecord; noteOverride?: string; onSaveNote: (record: LeadRecord, value: string) => void }) {
+function ConversationText({ record }: { record: LeadRecord }) {
   const allowedSpeakers = new Set([
     ...record.senderName.toLowerCase().split(/\s+/),
     record.senderName.toLowerCase(),
     record.firstName.toLowerCase(),
     record.fullName.toLowerCase(),
   ]);
-  const effectiveNotes = noteOverride !== undefined ? noteOverride : record.notes;
-  const [isEditing, setIsEditing] = useState(false);
-  const [draft, setDraft] = useState(effectiveNotes);
-
-  useEffect(() => { setDraft(effectiveNotes); }, [effectiveNotes]);
-
-  if (isEditing) {
-    return (
-      <div className="conversation-full">
-        <textarea className="notes-editor" value={draft} onChange={(event) => setDraft(event.target.value)} rows={12} style={{ width: "100%", marginBottom: "8px", padding: "8px", fontFamily: "inherit", fontSize: "inherit", boxSizing: "border-box" }} />
-        <div style={{ display: "flex", gap: "8px" }}>
-          <button className="card-toggle" onClick={() => { onSaveNote(record, draft); setIsEditing(false); }}>Save</button>
-          <button className="card-toggle" onClick={() => { setDraft(effectiveNotes); setIsEditing(false); }}>Cancel</button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="conversation-full">
-      <div style={{ marginBottom: "8px" }}>
-        <button className="card-toggle" onClick={() => setIsEditing(true)}>Edit Notes</button>
-      </div>
-      {(effectiveNotes || "No conversation was included in this spreadsheet row.").split(/\r?\n/).map((line, index) => {
+      {(record.conversation || "No conversation was included in this spreadsheet row.").split(/\r?\n/).map((line, index) => {
         const match = line.match(/^\s*([^:\n]{1,70}):(.*)$/);
         const speaker = match?.[1]?.trim() ?? "";
         const message = match?.[2] ?? line;
@@ -207,7 +262,8 @@ export default function Home() {
   const [selectedRecord, setSelectedRecord] = useState<LeadRecord | null>(null);
   const [archivedKeys, setArchivedKeys] = useState<string[]>(() => readLocal<string[]>(ARCHIVE_KEY, []));
   const [pinnedKeys, setPinnedKeys] = useState<string[]>(() => readLocal<string[]>(PINNED_KEY, []));
-  const [notesOverrides, setNotesOverrides] = useState<Record<string, string>>(() => readLocal<Record<string, string>>(NOTES_KEY, {}));
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>(() => readLocal<Record<string, string>>(NOTES_DRAFT_KEY, {}));
+  const [notePending, setNotePending] = useState<Record<string, PendingNote>>(() => readLocal<Record<string, PendingNote>>(NOTES_PENDING_KEY, {}));
 
   const toggleArchive = (record: LeadRecord) => {
     const key = archiveKey(record);
@@ -227,11 +283,31 @@ export default function Home() {
     });
   };
 
-  const saveNote = (record: LeadRecord, value: string) => {
+  // Track in-progress typing. Passing undefined discards the draft and falls
+  // back to the Sheet value.
+  const changeDraft = (record: LeadRecord, value: string | undefined) => {
     const key = archiveKey(record);
-    setNotesOverrides((current) => {
-      const next = { ...current, [key]: value };
-      saveLocal(NOTES_KEY, next);
+    setNoteDrafts((current) => {
+      const next = { ...current };
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+      saveLocal(NOTES_DRAFT_KEY, next);
+      return next;
+    });
+  };
+
+  // A write succeeded: drop the draft and hold the value until the Sheet echoes it.
+  const markSaved = (record: LeadRecord, value: string) => {
+    const key = archiveKey(record);
+    setNoteDrafts((current) => {
+      const next = { ...current };
+      delete next[key];
+      saveLocal(NOTES_DRAFT_KEY, next);
+      return next;
+    });
+    setNotePending((current) => {
+      const next = { ...current, [key]: { value, savedAt: Date.now() } };
+      saveLocal(NOTES_PENDING_KEY, next);
       return next;
     });
   };
@@ -257,6 +333,22 @@ export default function Home() {
       const firstLoad = knownIds.length === 0;
       setNewIds(firstLoad ? [] : actions.filter((record) => !knownIds.includes(record.id)).map((record) => record.id));
       saveLocal(SEEN_KEY, Array.from(new Set([...knownIds, ...actions.map((record) => record.id)])));
+
+      // The Sheet is authoritative. Any pending write it now reflects (or that
+      // has outlived its TTL) is dropped so the Sheet value shows through.
+      setNotePending((current) => {
+        const next: Record<string, PendingNote> = {};
+        const byKey = new Map(nextRecords.map((record) => [archiveKey(record), record]));
+        Object.keys(current).forEach((key) => {
+          const entry = current[key];
+          const record = byKey.get(key);
+          const echoed = record ? record.notesCell === entry.value : false;
+          const expired = Date.now() - entry.savedAt >= PENDING_TTL_MS;
+          if (!echoed && !expired) next[key] = entry;
+        });
+        saveLocal(NOTES_PENDING_KEY, next);
+        return next;
+      });
 
       const now = new Date().toISOString();
       setRecords(nextRecords);
@@ -346,7 +438,7 @@ export default function Home() {
                 <p>Prospects you have pinned for closer attention.</p>
               </div>
               <div className="lead-grid active-grid">
-                {pinned.map((record) => <LeadCard key={record.id} record={record} pinned archived={archivedKeys.includes(archiveKey(record))} noteOverride={notesOverrides[archiveKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onSaveNote={saveNote} />)}
+                {pinned.map((record) => <LeadCard key={record.id} record={record} pinned archived={archivedKeys.includes(archiveKey(record))} draft={noteDrafts[archiveKey(record)]} pending={notePending[archiveKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />)}
               </div>
             </section>
           ) : null}
@@ -356,7 +448,7 @@ export default function Home() {
               <p>Most recent video watch first, then most recent video sent.</p>
             </div>
             <div className="lead-grid">
-              {unpinnedActions.length ? unpinnedActions.map((record) => <LeadCard key={record.id} record={record} pinned={pinnedKeys.includes(archiveKey(record))} archived={archivedKeys.includes(archiveKey(record))} noteOverride={notesOverrides[archiveKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onSaveNote={saveNote} />) : <p className="queue-empty">No prospects match this view.</p>}
+              {unpinnedActions.length ? unpinnedActions.map((record) => <LeadCard key={record.id} record={record} pinned={pinnedKeys.includes(archiveKey(record))} archived={archivedKeys.includes(archiveKey(record))} draft={noteDrafts[archiveKey(record)]} pending={notePending[archiveKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />) : <p className="queue-empty">No prospects match this view.</p>}
             </div>
           </section>
 
@@ -366,7 +458,7 @@ export default function Home() {
               <p>Most recent video watch first.</p>
             </div>
             <div className="lead-grid">
-              {archived.length ? archived.map((record) => <LeadCard key={record.id} record={record} pinned={pinnedKeys.includes(archiveKey(record))} archived noteOverride={notesOverrides[archiveKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onSaveNote={saveNote} />) : <p className="queue-empty">No archived prospects.</p>}
+              {archived.length ? archived.map((record) => <LeadCard key={record.id} record={record} pinned={pinnedKeys.includes(archiveKey(record))} archived draft={noteDrafts[archiveKey(record)]} pending={notePending[archiveKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />) : <p className="queue-empty">No archived prospects.</p>}
             </div>
           </section>
 
@@ -383,7 +475,7 @@ export default function Home() {
               </div>
               <button className="close-button" onClick={() => setSelectedRecord(null)} aria-label="Close conversation">Close</button>
             </div>
-            <ConversationText record={selectedRecord} noteOverride={notesOverrides[archiveKey(selectedRecord)]} onSaveNote={saveNote} />
+            <ConversationText record={selectedRecord} />
             <div className="panel-footer">
               <span>{formatActivityTime(selectedRecord.timestamp)}</span>
               <div className="card-actions">

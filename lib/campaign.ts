@@ -19,6 +19,10 @@ export type LeadRecord = {
   email: string;
   profileUrl: string;
   notes: string;
+  /** Column F verbatim. This is the editable field the dashboard writes back to. */
+  notesCell: string;
+  /** Column G verbatim (Summary) -- the LinkedIn transcript. Never mixed with F. */
+  conversation: string;
   videoSent: string;
   timestamp: string;
   lastSearched: string;
@@ -172,6 +176,8 @@ export function normalizeRows(rows: RawRow[]): LeadRecord[] {
         email: cell(row, "Lead Email", 4),
         profileUrl,
         notes,
+        notesCell: noteText,
+        conversation: summaryText,
         videoSent,
         timestamp,
         lastSearched,
