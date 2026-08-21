@@ -713,4 +713,18 @@ h2 {
     line-height: 1.1;
     overflow-wrap: anywhere;
   }
+
+/* Restore green styling for the "Video watched" indicator */
+.watched-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #1e7b52;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.watched-indicator.complete {
+  color: #1e7b52;
+}
 }
