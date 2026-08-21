@@ -385,7 +385,7 @@ export default function Home() {
 
   const activeRecords = searchedRecords.filter((record) => !archivedKeys.includes(archiveKey(record)));
   const archivedRecords = searchedRecords.filter((record) => archivedKeys.includes(archiveKey(record)));
-  const actionRecords = activeRecords.filter((record) => record.priority <= 3);
+  const actionRecords = activeRecords.filter((record) => record.priority <= 3 && record.hasWatched);
   const actions = actionRecords
     .sort((left, right) => {
       const leftWatchTime = left.hasWatched ? Date.parse(left.watchedAt) || 0 : 0;
