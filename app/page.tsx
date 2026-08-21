@@ -37,7 +37,7 @@ function effectiveStatus(record: LeadRecord) {
 
 function WatchedIndicator({ date, complete }: { date: string; complete: boolean }) {
   return (
-    <span className={complete ? "watched-indicator complete" : "watched-indicator"}>
+    <span className={complete ? "watched-indicator complete" : "watched-indicator"} style={complete ? { color: "#1e7b52", fontWeight: 700 } : undefined}>
       {complete ? "\u2713 " : ""}Video watched{date ? ": " + formatDateOnly(date) : complete ? ": date unavailable" : ""}
     </span>
   );
