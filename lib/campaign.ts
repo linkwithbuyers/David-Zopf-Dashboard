@@ -21,6 +21,10 @@ export type LeadRecord = {
   notes: string;
   /** Column F verbatim. This is the editable field the dashboard writes back to. */
   notesCell: string;
+  /** Column W verbatim (P = pinned, A = archived, blank = neither). */
+  statusCell: string;
+  pinned: boolean;
+  archived: boolean;
   /** Column G verbatim (Summary) -- the LinkedIn transcript. Never mixed with F. */
   conversation: string;
   videoSent: string;
@@ -159,6 +163,7 @@ export function normalizeRows(rows: RawRow[]): LeadRecord[] {
       const videoSent = cell(row, "Video Sent", 2);
       const lastSearched = cell(row, "Last Searched", 7);
       const senderName = cell(row, "Sender Name", 15) || "David Zopf";
+      const statusCell = cell(row, "Status", 22).trim().toUpperCase();
       const details = activityKind([noteText, summaryText].filter(Boolean).join("\n"), videoSent, lastSearched, cell(row, "Event Type", 13), senderName);
       const id = [profileUrl || `${firstName}-${lastName}`, timestamp, notes]
         .join("|")
@@ -176,6 +181,9 @@ export function normalizeRows(rows: RawRow[]): LeadRecord[] {
         email: cell(row, "Lead Email", 4),
         profileUrl,
         notes,
+        statusCell,
+        pinned: statusCell === "P",
+        archived: statusCell === "A",
         notesCell: noteText,
         conversation: summaryText,
         videoSent,
